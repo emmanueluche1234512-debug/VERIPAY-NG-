@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Remix Veripay NG",
+  "description": "Bank-transfer payment verification service for developers and merchants. Deterministically match and verify incoming Nigerian bank-transfer alerts without acting as a payment gateway.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
