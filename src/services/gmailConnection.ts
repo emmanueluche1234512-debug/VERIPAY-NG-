@@ -61,61 +61,76 @@ export const gmailConnectionService = {
   },
 
   /**
-   * Generates a cryptographically random OAuth state token bound to the project.
-   * Endpoint equivalent: POST /api/v1/gmail-connection/connect
-   * Note: Does NOT write to `gmail_connections` from the browser.
+   * Requests real Google OAuth 2.0 authorization URL and state token from backend.
+   * Endpoint: GET /api/auth/google/start?project_id=...
+   * Note: The server creates and records single-use state in public.oauth_states.
    */
   async initiateOAuth(
     projectId: string,
-    redirectUri = (typeof window !== 'undefined' ? window.location.origin : 'https://example.com') +
-      '/api/auth/google/callback'
+    redirectUri = 'https://veripay-ng.vercel.app/api/auth/google/callback'
   ): Promise<{ state: string; authUrl: string }> {
-    const entropy =
-      typeof crypto !== 'undefined' && crypto.getRandomValues
-        ? Array.from(crypto.getRandomValues(new Uint8Array(16)))
-            .map(b => b.toString(16).padStart(2, '0'))
-            .join('')
-        : Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    if (!projectId) {
+      throw new Error('Project ID is required to initiate OAuth.');
+    }
 
-    const stateToken = `vp_oauth_${entropy}`;
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token;
+    if (!token) {
+      throw new Error('Active user session is required to initiate Google OAuth.');
+    }
 
-    const authUrl =
-      `https://accounts.google.com/o/oauth2/v2/auth?` +
-      `client_id=GOOGLE_CLIENT_ID` +
-      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-      `&response_type=code` +
-      `&scope=${encodeURIComponent(
-        'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email'
-      )}` +
-      `&access_type=offline` +
-      `&prompt=consent` +
-      `&state=${stateToken}`;
+    const res = await fetch(`/api/auth/google/start?project_id=${encodeURIComponent(projectId)}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json'
+      }
+    });
 
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `Failed to initiate OAuth (status ${res.status})`);
+    }
+
+    const data = await res.json();
     return {
-      state: stateToken,
-      authUrl
+      state: data.state,
+      authUrl: data.authUrl
     };
   },
 
   /**
-   * Server-side OAuth disconnect handler.
-   * Endpoint equivalent: POST /api/v1/gmail-connection/disconnect
+   * Secure server-side OAuth disconnect handler.
+   * Endpoint: POST /api/auth/google/disconnect
+   * Browser does not directly modify public.gmail_connections.
    */
   async disconnect(projectId: string, email?: string): Promise<boolean> {
     if (!projectId || !isSupabaseConfigured) return false;
 
     try {
-      await supabase.from('audit_logs').insert({
-        project_id: projectId,
-        action: 'gmail_connection.disconnect_requested',
-        details: {
-          email: email || 'unknown',
-          timestamp: new Date().toISOString()
-        }
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) {
+        throw new Error('Active user session is required to disconnect Gmail.');
+      }
+
+      const res = await fetch('/api/auth/google/disconnect', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ projectId, email })
       });
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || `Disconnect failed with status ${res.status}`);
+      }
+
       return true;
     } catch (err: any) {
-      console.warn('[gmailConnectionService] Error logging disconnect request:', err?.message);
+      console.warn('[gmailConnectionService] Disconnect error:', err?.message);
       return false;
     }
   }

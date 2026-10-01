@@ -7,12 +7,8 @@ import {
   AlertCircle,
   RefreshCw,
   Unlink,
-  X,
   Lock,
   ArrowRight,
-  Info,
-  Copy,
-  Check,
   Loader2
 } from 'lucide-react';
 import { merchantService } from '../../services/merchant';
@@ -72,11 +68,8 @@ export const MerchantVeripaySettings: React.FC<MerchantVeripaySettingsProps> = (
   const [bankError, setBankError] = useState<string | null>(null);
   const [bankSuccess, setBankSuccess] = useState<string | null>(null);
 
-  // Google OAuth Initiation Modal states (Phase 3A Contract — Never fakes connection)
-  const [isOAuthModalOpen, setIsOAuthModalOpen] = useState(false);
-  const [oauthSessionData, setOauthSessionData] = useState<{ state: string; authUrl: string } | null>(null);
+  // Google OAuth states
   const [oauthInitiating, setOauthInitiating] = useState(false);
-  const [copiedAuthUrl, setCopiedAuthUrl] = useState(false);
 
   const [isDisconnectModalOpen, setIsDisconnectModalOpen] = useState(false);
   const [gmailActionLoading, setGmailActionLoading] = useState(false);
@@ -131,6 +124,31 @@ export const MerchantVeripaySettings: React.FC<MerchantVeripaySettingsProps> = (
     loadData();
   }, [projectId]);
 
+  // Handle URL return parameters from Google OAuth callback
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const gmailStatus = params.get('gmail_status');
+    const errorCode = params.get('error_code');
+    const errorMsg = params.get('error_msg') || params.get('error');
+
+    if (gmailStatus === 'connected') {
+      setActionNotice('Google Gmail account connected successfully! Bank-alert verification is active.');
+      loadData();
+      onRefresh?.();
+      window.history.replaceState({}, '', window.location.pathname);
+      setTimeout(() => setActionNotice(null), 6000);
+    } else if (gmailStatus === 'denied') {
+      setBankError('Google authorization was cancelled or access was denied.');
+      window.history.replaceState({}, '', window.location.pathname);
+      setTimeout(() => setBankError(null), 6000);
+    } else if (gmailStatus === 'error') {
+      setBankError(`Google OAuth connection failed: ${errorMsg || errorCode || 'Authentication error'}`);
+      window.history.replaceState({}, '', window.location.pathname);
+      setTimeout(() => setBankError(null), 7000);
+    }
+  }, []);
+
   // Save Bank Configuration to public.bank_accounts
   const handleSaveBankConfiguration = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -184,22 +202,24 @@ export const MerchantVeripaySettings: React.FC<MerchantVeripaySettingsProps> = (
   };
 
   /**
-   * Initiates Google OAuth 2.0 session via backend (`POST /api/v1/gmail-connection/connect`).
+   * Initiates real Google OAuth 2.0 flow via backend (GET /api/auth/google/start).
+   * Redirects browser directly to Google OAuth consent screen.
    */
   const handleInitiateGmailOAuth = async () => {
     if (!projectId) return;
     setOauthInitiating(true);
     setActionNotice(null);
+    setBankError(null);
     try {
-      const session = await gmailConnectionService.initiateOAuth(
-        projectId,
-        `${window.location.origin}/api/auth/google/callback`
-      );
-      setOauthSessionData(session);
-      setIsOAuthModalOpen(true);
+      const session = await gmailConnectionService.initiateOAuth(projectId);
+      if (session?.authUrl) {
+        window.location.href = session.authUrl;
+      } else {
+        throw new Error('Server did not return an authorization URL.');
+      }
     } catch (err: any) {
-      console.warn('[VeripayAdminSettings] Error initiating OAuth:', err?.message);
-    } finally {
+      console.error('[VeripayAdminSettings] Error initiating OAuth:', err);
+      setBankError(err?.message || 'Failed to initiate Google OAuth.');
       setOauthInitiating(false);
     }
   };
@@ -209,24 +229,22 @@ export const MerchantVeripaySettings: React.FC<MerchantVeripaySettingsProps> = (
     if (!projectId) return;
     setGmailActionLoading(true);
     try {
-      await gmailConnectionService.disconnect(projectId, gmailConnection?.email);
-      setGmailConnection(null);
-      setIsDisconnectModalOpen(false);
-      setActionNotice('Gmail bank-alert connection disconnected.');
-      setTimeout(() => setActionNotice(null), 4000);
-      onRefresh?.();
+      const success = await gmailConnectionService.disconnect(projectId, gmailConnection?.email);
+      if (success) {
+        setGmailConnection(null);
+        setIsDisconnectModalOpen(false);
+        setActionNotice('Gmail bank-alert connection disconnected successfully.');
+        setTimeout(() => setActionNotice(null), 4000);
+        onRefresh?.();
+      } else {
+        throw new Error('Failed to disconnect Gmail connection on server.');
+      }
     } catch (err: any) {
       console.warn('[VeripayAdminSettings] Disconnect error:', err?.message);
+      setBankError(err?.message || 'Failed to disconnect Gmail.');
     } finally {
       setGmailActionLoading(false);
     }
-  };
-
-  const handleCopyAuthUrl = () => {
-    if (!oauthSessionData?.authUrl) return;
-    navigator.clipboard.writeText(oauthSessionData.authUrl);
-    setCopiedAuthUrl(true);
-    setTimeout(() => setCopiedAuthUrl(false), 2200);
   };
 
   const isGmailConnected = Boolean(gmailConnection && gmailConnection.status === 'connected');
@@ -547,105 +565,6 @@ export const MerchantVeripaySettings: React.FC<MerchantVeripaySettingsProps> = (
               </div>
             )}
           </section>
-        </div>
-      )}
-
-      {/* ==================================================================== */}
-      {/* GOOGLE OAUTH SESSION MODAL */}
-      {/* ==================================================================== */}
-      {isOAuthModalOpen && oauthSessionData && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
-          <div className="bg-white rounded-xl max-w-lg w-full border border-[#E9ECEF] shadow-xl overflow-hidden">
-            <div className="p-5 border-b border-[#E9ECEF] flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-7 h-7 rounded-md bg-[#0B0D11] text-white flex items-center justify-center font-bold text-xs">
-                  VP
-                </div>
-                <div>
-                  <span className="text-xs font-bold text-[#0B0D11] block">
-                    Google OAuth 2.0 Session Prepared
-                  </span>
-                  <span className="text-[10px] font-mono text-[#6C757D] block">
-                    POST /api/v1/gmail-connection/connect
-                  </span>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsOAuthModalOpen(false)}
-                className="text-[#6C757D] hover:text-[#0B0D11] cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4 text-xs">
-              <div className="p-3.5 bg-amber-50 border border-amber-200 text-amber-950 rounded-lg flex items-start gap-2.5">
-                <Info className="w-4 h-4 text-amber-800 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <span className="font-bold block">Phase 3A Honest OAuth Boundary:</span>
-                  <p className="text-[11px] text-amber-900 leading-relaxed">
-                    VERIPAY NG has generated a cryptographic OAuth <code className="font-mono font-bold">state</code> token bound to project <strong className="text-[#0B0D11]">{projectName}</strong>.
-                    Live Google OAuth callback token exchange and Gmail inbox polling belong to <strong>Phase 4 &amp; Phase 5</strong>.
-                    Status honestly remains <strong>Not Connected</strong> until real Google OAuth authorization is completed.
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-2 p-3.5 bg-[#F8F9FA] rounded-lg border border-[#E9ECEF] font-mono text-[11px]">
-                <div className="flex items-center justify-between">
-                  <span className="text-[#6C757D]">Bound Project ID:</span>
-                  <span className="font-bold text-[#0B0D11]">{projectId}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[#6C757D]">OAuth State Token:</span>
-                  <span className="font-bold text-[#0B0D11]">{oauthSessionData.state}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[#6C757D]">Requested Scope:</span>
-                  <span className="text-emerald-800 font-semibold">gmail.readonly</span>
-                </div>
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-[11px] font-semibold text-[#0B0D11]">
-                    Generated Google OAuth Authorization URL
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleCopyAuthUrl}
-                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#0B0D11] hover:underline cursor-pointer"
-                  >
-                    {copiedAuthUrl ? (
-                      <>
-                        <Check className="w-3 h-3 text-emerald-600" />
-                        <span>Copied</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3 h-3" />
-                        <span>Copy URL</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-                <div className="p-2.5 bg-[#0B0D11] text-[#CED4DA] rounded-md font-mono text-[10px] break-all">
-                  {oauthSessionData.authUrl}
-                </div>
-              </div>
-            </div>
-
-            <div className="p-4 bg-[#F8F9FA] border-t border-[#E9ECEF] flex items-center justify-end">
-              <button
-                type="button"
-                onClick={() => setIsOAuthModalOpen(false)}
-                className="px-4 py-2 rounded-lg text-xs font-semibold bg-[#0B0D11] text-white hover:bg-[#1E232B] cursor-pointer"
-              >
-                Close
-              </button>
-            </div>
-          </div>
         </div>
       )}
 

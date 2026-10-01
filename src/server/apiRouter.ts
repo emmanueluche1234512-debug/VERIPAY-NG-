@@ -4,6 +4,11 @@ import { apiKeysService, hashSecret } from '../services/apiKeys';
 import { merchantService } from '../services/merchant';
 import { gmailConnectionService } from '../services/gmailConnection';
 import {
+  handleGoogleOAuthStart,
+  handleGoogleOAuthCallback,
+  handleGoogleOAuthDisconnect
+} from './googleOAuth';
+import {
   ordersService,
   computeCheckoutStatus,
   generateCheckoutToken,
@@ -18,7 +23,7 @@ import { ApiKeyScope, Currency, ReceivingBankAccount } from '../types';
  * Uses SUPABASE_SERVICE_ROLE_KEY on the backend to perform server-write-only
  * operations on `public.checkout_sessions`, `public.gmail_connections`, and `public.orders`.
  */
-function getServerSupabaseClient() {
+export function getServerSupabaseClient() {
   const url =
     process.env.SUPABASE_URL ||
     process.env.VITE_SUPABASE_URL ||
@@ -44,7 +49,7 @@ function getServerSupabaseClient() {
 /**
  * Helper to parse JSON body from incoming HTTP request stream
  */
-async function parseJsonBody(req: IncomingMessage): Promise<any> {
+export async function parseJsonBody(req: IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
     let body = '';
     req.on('data', chunk => {
@@ -68,16 +73,66 @@ async function parseJsonBody(req: IncomingMessage): Promise<any> {
 /**
  * Helper to send JSON responses
  */
-function sendJson(res: ServerResponse, statusCode: number, data: any) {
+export function sendJson(res: ServerResponse, statusCode: number, data: any) {
   res.statusCode = statusCode;
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Authorization, Content-Type, Accept, X-Checkout-Token'
+    'Authorization, Content-Type, Accept, X-Checkout-Token, X-Requested-With'
   );
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
   res.end(JSON.stringify(data));
+}
+
+/**
+ * Unified API Request Dispatcher for all /api/* routes
+ * Handles /api/auth/google/* and /api/v1/*
+ */
+export async function handleApiRequest(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<boolean> {
+  const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const pathname = urlObj.pathname.replace(/\/$/, '');
+
+  // Handle CORS preflight across all /api endpoints
+  if (pathname.startsWith('/api') && req.method === 'OPTIONS') {
+    res.statusCode = 204;
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Authorization, Content-Type, Accept, X-Checkout-Token, X-Requested-With'
+    );
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
+    res.end();
+    return true;
+  }
+
+  // Google OAuth Start
+  if (pathname === '/api/auth/google/start') {
+    await handleGoogleOAuthStart(req, res, urlObj);
+    return true;
+  }
+
+  // Google OAuth Callback
+  if (pathname === '/api/auth/google/callback') {
+    await handleGoogleOAuthCallback(req, res, urlObj);
+    return true;
+  }
+
+  // Google OAuth Disconnect
+  if (pathname === '/api/auth/google/disconnect' && req.method === 'POST') {
+    await handleGoogleOAuthDisconnect(req, res);
+    return true;
+  }
+
+  // Existing /api/v1/* routes
+  if (pathname.startsWith('/api/v1')) {
+    return handleApiV1Request(req, res);
+  }
+
+  return false;
 }
 
 /**
@@ -493,19 +548,49 @@ export async function handleApiV1Request(
     // 5. Route: POST /api/v1/gmail-connection/connect
     // ------------------------------------------------------------------------
     if (endpoint === '/gmail-connection/connect' && req.method === 'POST') {
-      const body = await parseJsonBody(req);
-      const redirectUri =
-        body.redirectUri ||
-        `${req.headers['origin'] || 'http://localhost:3000'}/api/auth/google/callback`;
+      const clientId = process.env.GOOGLE_CLIENT_ID;
+      if (!clientId) {
+        sendJson(res, 500, { error: 'Server configuration error: GOOGLE_CLIENT_ID is not configured.' });
+        return true;
+      }
 
-      const oauthInfo = await gmailConnectionService.initiateOAuth(projectId, redirectUri);
+      // Generate cryptographically secure random state (32 bytes entropy)
+      const cryptoMod = await import('crypto');
+      const stateEntropy = cryptoMod.randomBytes(32).toString('hex');
+      const stateToken = `vp_state_${stateEntropy}`;
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+      // Persist state bound strictly to projectId in public.oauth_states
+      const { error: stateInsertErr } = await serverSupabase.from('oauth_states').insert({
+        state_token: stateToken,
+        project_id: projectId,
+        redirect_uri: 'https://veripay-ng.vercel.app/api/auth/google/callback',
+        expires_at: expiresAt,
+        used_at: null
+      });
+
+      if (stateInsertErr) {
+        console.error('[API v1] Failed to persist oauth_state record:', stateInsertErr.message);
+        sendJson(res, 500, { error: 'Failed to record secure OAuth session state.' });
+        return true;
+      }
+
+      const googleAuthUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+      googleAuthUrl.searchParams.set('client_id', clientId);
+      googleAuthUrl.searchParams.set('redirect_uri', 'https://veripay-ng.vercel.app/api/auth/google/callback');
+      googleAuthUrl.searchParams.set('response_type', 'code');
+      googleAuthUrl.searchParams.set('scope', 'https://www.googleapis.com/auth/gmail.readonly');
+      googleAuthUrl.searchParams.set('access_type', 'offline');
+      googleAuthUrl.searchParams.set('prompt', 'consent');
+      googleAuthUrl.searchParams.set('state', stateToken);
+
       sendJson(res, 200, {
         success: true,
         status: 'not_connected',
-        authUrl: oauthInfo.authUrl,
-        state: oauthInfo.state,
+        authUrl: googleAuthUrl.toString(),
+        state: stateToken,
         message:
-          'Google OAuth state initialized. Status remains not_connected until Google OAuth callback completes.'
+          'Google OAuth state initialized and bound to project in oauth_states. Status remains not_connected until callback completes.'
       });
       return true;
     }
@@ -514,12 +599,7 @@ export async function handleApiV1Request(
     // 6. Route: POST /api/v1/gmail-connection/disconnect
     // ------------------------------------------------------------------------
     if (endpoint === '/gmail-connection/disconnect' && req.method === 'POST') {
-      const success = await gmailConnectionService.disconnect(projectId);
-      sendJson(res, 200, {
-        success,
-        connected: false,
-        status: 'not_connected'
-      });
+      await handleGoogleOAuthDisconnect(req, res);
       return true;
     }
 
