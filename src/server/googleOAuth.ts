@@ -430,13 +430,76 @@ export async function handleGoogleOAuthCallback(
       tokenData = await tokenResponse.json();
     } catch (tokenExchangeErr: any) {
       const httpStatus = tokenExchangeErr?.status || tokenExchangeErr?.statusCode || 'N/A';
-      const errorDescription = tokenExchangeErr?.responseBody || tokenExchangeErr?.message || 'Unknown token endpoint error';
+      const rawResponseBody = tokenExchangeErr?.responseBody;
+      const fallbackMsg = tokenExchangeErr?.message || 'Unknown token endpoint error';
+
+      let parsedError = '';
+      let parsedErrorDesc = '';
+
+      if (rawResponseBody && typeof rawResponseBody === 'string') {
+        try {
+          const parsed = JSON.parse(rawResponseBody);
+          if (parsed && typeof parsed === 'object') {
+            if (typeof parsed.error === 'string') {
+              parsedError = parsed.error;
+            } else if (parsed.error && typeof parsed.error === 'object') {
+              parsedError = parsed.error.status || (parsed.error.code ? String(parsed.error.code) : '') || '';
+              if (typeof parsed.error.message === 'string') {
+                parsedErrorDesc = parsed.error.message;
+              }
+            }
+
+            if (!parsedErrorDesc && typeof parsed.error_description === 'string') {
+              parsedErrorDesc = parsed.error_description;
+            }
+          }
+        } catch {
+          // Response body was not JSON
+        }
+      }
+
+      const rawError = parsedError || (httpStatus !== 'N/A' ? `http_${httpStatus}` : 'token_exchange_failed');
+      const rawDesc = parsedErrorDesc || parsedError || (typeof rawResponseBody === 'string' && rawResponseBody.trim() && !rawResponseBody.startsWith('{') ? rawResponseBody : fallbackMsg);
+
+      const sanitize = (val: string, maxLen: number): string => {
+        let s = val;
+        const secrets = [clientSecret, code];
+        for (const secret of secrets) {
+          if (secret && typeof secret === 'string' && secret.trim().length > 0) {
+            s = s.split(secret).join('[REDACTED]');
+          }
+        }
+        s = s
+          .replace(/(client_secret|clientSecret)=([^&\s]+)/gi, '$1=[REDACTED]')
+          .replace(/(code)=([^&\s]+)/gi, '$1=[REDACTED]')
+          .replace(/(refresh_token|refreshToken)=([^&\s]+)/gi, '$1=[REDACTED]')
+          .replace(/(access_token|accessToken)=([^&\s]+)/gi, '$1=[REDACTED]')
+          .replace(/Bearer\s+[A-Za-z0-9._~+/-]+/gi, 'Bearer [REDACTED]')
+          .trim();
+        if (s.length > maxLen) {
+          s = s.slice(0, maxLen - 3) + '...';
+        }
+        return s;
+      };
+
+      const safeError = sanitize(rawError, 100);
+      const safeErrorDescription = sanitize(rawDesc, 300);
+
       console.error(
-        `[Google OAuth] Google token endpoint error — HTTP Status: ${httpStatus}, Error Response: ${errorDescription}`
+        `[Google OAuth] Google token endpoint error — HTTP Status: ${httpStatus}, Error Response: ${safeErrorDescription}`
       );
+
+      const redirectParams = new URLSearchParams({
+        gmail_status: 'error',
+        error_code: 'token_exchange_failed',
+        error_msg: 'Failed to exchange authorization code',
+        error: safeError,
+        error_description: safeErrorDescription
+      });
+
       sendRedirect(
         res,
-        '/merchant-admin?gmail_status=error&error_code=token_exchange_failed&error_msg=Failed+to+exchange+authorization+code'
+        `/merchant-admin?${redirectParams.toString()}`
       );
       return;
     }

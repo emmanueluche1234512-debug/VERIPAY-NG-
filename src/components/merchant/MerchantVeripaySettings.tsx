@@ -130,7 +130,8 @@ export const MerchantVeripaySettings: React.FC<MerchantVeripaySettingsProps> = (
     const params = new URLSearchParams(window.location.search);
     const gmailStatus = params.get('gmail_status');
     const errorCode = params.get('error_code');
-    const errorMsg = params.get('error_msg') || params.get('error');
+    const errorDescription = params.get('error_description');
+    const errorMsg = errorDescription || params.get('error_msg') || params.get('error');
 
     if (gmailStatus === 'connected') {
       setActionNotice('Google Gmail account connected successfully! Bank-alert verification is active.');
