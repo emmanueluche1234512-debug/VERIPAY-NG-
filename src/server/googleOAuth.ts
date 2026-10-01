@@ -402,23 +402,37 @@ export async function handleGoogleOAuthCallback(
       return;
     }
 
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: new URLSearchParams({
-        code,
-        client_id: clientId,
-        client_secret: clientSecret,
-        redirect_uri: GOOGLE_OAUTH_CALLBACK_URL,
-        grant_type: 'authorization_code'
-      }).toString()
-    });
+    let tokenData: any;
+    try {
+      const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: GOOGLE_OAUTH_CALLBACK_URL,
+          grant_type: 'authorization_code'
+        }).toString()
+      });
 
-    if (!tokenResponse.ok) {
+      if (!tokenResponse.ok) {
+        const errorBody = await tokenResponse.text();
+        const httpStatus = tokenResponse.status;
+        const err = new Error(`Token exchange failed with HTTP ${httpStatus}: ${errorBody}`) as any;
+        err.status = httpStatus;
+        err.responseBody = errorBody;
+        throw err;
+      }
+
+      tokenData = await tokenResponse.json();
+    } catch (tokenExchangeErr: any) {
+      const httpStatus = tokenExchangeErr?.status || tokenExchangeErr?.statusCode || 'N/A';
+      const errorDescription = tokenExchangeErr?.responseBody || tokenExchangeErr?.message || 'Unknown token endpoint error';
       console.error(
-        `[Google OAuth] Token exchange failed with status ${tokenResponse.status}`
+        `[Google OAuth] Google token endpoint error — HTTP Status: ${httpStatus}, Error Response: ${errorDescription}`
       );
       sendRedirect(
         res,
@@ -427,7 +441,6 @@ export async function handleGoogleOAuthCallback(
       return;
     }
 
-    const tokenData = await tokenResponse.json();
     const accessToken = tokenData.access_token;
     const refreshToken = tokenData.refresh_token;
     const expiresIn = Number(tokenData.expires_in) || 3600;
